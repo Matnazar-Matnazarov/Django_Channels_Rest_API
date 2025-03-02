@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Online Users Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50">
+    <div class="max-w-6xl mx-auto p-6">
+        <!-- Login Form -->
+        <div id="loginForm" class="max-w-md mx-auto bg-white rounded-xl shadow-md overflow-hidden p-6">
+            <h2 class="text-2xl font-bold mb-6 text-gray-800">Login</h2>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Username</label>
+                    <input type="text" id="username" 
+                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-2 border"
+                        placeholder="Enter username">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Password</label>
+                    <input type="password" id="password" 
+                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-2 border"
+                        placeholder="Enter password">
+                </div>
+                <button onclick="login()" 
+                    class="w-full bg-indigo-600 text-white rounded-md py-2 px-4 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
+                    Login
+                </button>
+            </div>
+        </div>
+
+        <!-- Users Dashboard -->
+        <div id="usersContainer" class="hidden">
+            <div class="mb-6 flex justify-between items-center">
+                <h2 class="text-2xl font-bold text-gray-800">Users Dashboard</h2>
+                <div class="flex items-center space-x-4">
+                    <span id="sessionStatus" class="text-sm font-medium text-green-600">Active Session</span>
+                    <button onclick="logout()" 
+                        class="bg-red-600 text-white rounded-md py-2 px-4 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">
+                        Logout
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Stats Overview -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                <div class="bg-white rounded-xl shadow-sm p-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-2">Total Users</h3>
+                    <p id="totalUsers" class="text-3xl font-bold text-indigo-600">0</p>
+                </div>
+                <div class="bg-white rounded-xl shadow-sm p-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-2">Online Users</h3>
+                    <p id="onlineUsers" class="text-3xl font-bold text-green-600">0</p>
+                </div>
+                <div class="bg-white rounded-xl shadow-sm p-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-2">Offline Users</h3>
+                    <p id="offlineUsers" class="text-3xl font-bold text-gray-600">0</p>
+                </div>
+            </div>
+
+            <!-- Users List -->
+            <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                <div class="px-6 py-4 border-b border-gray-200">
+                    <h3 class="text-lg font-semibold text-gray-800">All Users</h3>
+                </div>
+                <div id="users-list" class="divide-y divide-gray-200"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentUserId = null;
+        const users = new Map();
+        let ws = null;
+
+        function updateStats() {
+            const totalUsersCount = users.size;
+            const onlineUsersCount = Array.from(users.values()).filter(user => user.is_online).length;
+            const offlineUsersCount = totalUsersCount - onlineUsersCount;
+
+            document.getElementById('totalUsers').textContent = totalUsersCount;
+            document.getElementById('onlineUsers').textContent = onlineUsersCount;
+            document.getElementById('offlineUsers').textContent = offlineUsersCount;
+        }
+
+        async function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                const response = await fetch('accounts/api/login/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Invalid credentials');
+                }
+
+                const data = await response.json();
+                localStorage.setItem('token', data.access);
+                
+                document.getElementById('loginForm').classList.add('hidden');
+                document.getElementById('usersContainer').classList.remove('hidden');
+                
+                connectWebSocket(data.access);
+
+            } catch (error) {
+                alert(error.message);
+            }
+        }
+
+        async function logout() {
+            try {
+                const token = localStorage.getItem('token');
+                if (token) {
+                    await fetch('accounts/api/logout/', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${token}`
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Logout error:', error);
+            }
+
+            localStorage.removeItem('token');
+            if (ws) {
+                ws.close();
+            }
+            
+            document.getElementById('loginForm').classList.remove('hidden');
+            document.getElementById('usersContainer').classList.add('hidden');
+            document.getElementById('username').value = '';
+            document.getElementById('password').value = '';
+            users.clear();
+            currentUserId = null;
+            updateStats(); // Reset stats on logout
+        }
+
+        function updateUsersList() {
+            const usersListElement = document.getElementById('users-list');
+            usersListElement.innerHTML = '';
+
+            // Sort users: online first, then by username
+            const sortedUsers = Array.from(users.values()).sort((a, b) => {
+                if (a.is_online !== b.is_online) {
+                    return b.is_online - a.is_online;
+                }
+                return a.username.localeCompare(b.username);
+            });
+
+            sortedUsers.forEach(user => {
+                const userElement = document.createElement('div');
+                const isCurrentUser = user.id === currentUserId;
+                
+                userElement.className = `p-4 hover:bg-gray-50 ${isCurrentUser ? 'bg-indigo-50' : ''}`;
+                userElement.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center space-x-3">
+                            <div class="h-2.5 w-2.5 rounded-full ${user.is_online ? 'bg-green-500' : 'bg-gray-300'} flex-shrink-0"></div>
+                            <div>
+                                <p class="text-sm font-medium ${isCurrentUser ? 'text-indigo-600' : 'text-gray-900'}">
+                                    ${user.username} ${isCurrentUser ? '(You)' : ''}
+                                </p>
+                                <p class="text-xs text-gray-500">${user.email || 'No email'}</p>
+                            </div>
+                        </div>
+                        <div class="text-xs text-gray-500">
+                            ${user.is_online ? 'Online' : `Last seen: ${new Date(user.last_seen).toLocaleString()}`}
+                        </div>
+                    </div>
+                `;
+                usersListElement.appendChild(userElement);
+            });
+
+            // Update stats after updating users list
+            updateStats();
+        }
+
+        function connectWebSocket(token) {
+            ws = new WebSocket(`ws://127.0.0.1:8000/ws/chat/?token=${token}`);
+
+            ws.onopen = function(e) {
+                console.log('WebSocket Connected');
+                document.getElementById('sessionStatus').textContent = 'Connected';
+                document.getElementById('sessionStatus').classList.remove('text-red-600');
+                document.getElementById('sessionStatus').classList.add('text-green-600');
+            };
+
+            ws.onmessage = function(e) {
+                const data = JSON.parse(e.data);
+                
+                switch(data.type) {
+                    case 'user.connected':
+                        currentUserId = data.user.id;
+                        users.set(data.user.id, data.user);
+                        break;
+                    
+                    case 'user.list':
+                        data.users.forEach(user => {
+                            users.set(user.id, user);
+                        });
+                        break;
+                    
+                    case 'user.update':
+                        if (data.action === 'update' || data.action === 'add') {
+                            users.set(data.user.id, data.user);
+                        } else if (data.action === 'remove') {
+                            users.delete(data.user.id);
+                        }
+                        break;
+                }
+                
+                updateUsersList();
+            };
+
+            ws.onclose = function(e) {
+                if (e.code === 4001) {
+                    logout();
+                }
+                document.getElementById('sessionStatus').textContent = 'Disconnected';
+                document.getElementById('sessionStatus').classList.remove('text-green-600');
+                document.getElementById('sessionStatus').classList.add('text-red-600');
+            };
+
+            ws.onerror = function(e) {
+                console.error('WebSocket Error:', e);
+                document.getElementById('sessionStatus').textContent = 'Error';
+                document.getElementById('sessionStatus').classList.remove('text-green-600');
+                document.getElementById('sessionStatus').classList.add('text-red-600');
+            };
+        }
+
+        // Auto-connect if token exists
+        document.addEventListener('DOMContentLoaded', () => {
+            const token = localStorage.getItem('token');
+            if (token) {
+                document.getElementById('loginForm').classList.add('hidden');
+                document.getElementById('usersContainer').classList.remove('hidden');
+                connectWebSocket(token);
+            }
+        });
+    </script>
+</body>
+</html>
